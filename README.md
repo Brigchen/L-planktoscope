@@ -24,7 +24,7 @@ bash run.sh
 
 或直接：
 ```bash
-python planktoscope_segment_viewer.py
+python plankton_viewer.py
 ```
 
 ## 功能
@@ -55,7 +55,7 @@ TIF, TIFF, JPG, JPEG, PNG, BMP, GIF, JFIF
 
 ```
 Planktoscope/
-├── planktoscope_segment_viewer.py   # 主程序
+├── plankton_viewer.py               # 主程序
 ├── imagecut.py                      # 独立切割函数（Microscope_Cut / Flowcam_Cut）
 ├── planktoscope.cfg                 # 自动生成的参数配置文件
 ├── requirements.txt                 # Python 依赖

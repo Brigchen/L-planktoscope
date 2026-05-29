@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 cd "$(dirname "$0")"
-python3 planktoscope_segment_viewer.py
+python3 plankton_viewer.py
 if [ $? -ne 0 ]; then
     echo ""
     echo "[ERROR] 启动失败，请确认已安装 Python 和依赖："

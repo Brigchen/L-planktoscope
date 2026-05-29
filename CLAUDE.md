@@ -9,7 +9,7 @@ Planktoscope is a PyQt5 desktop tool for interactively previewing and tuning mic
 ## Running
 
 ```bash
-python planktoscope_segment_viewer.py
+python plankton_viewer.py
 ```
 
 ## Dependencies
@@ -20,8 +20,8 @@ pip install PyQt5 opencv-python numpy imageio
 
 ## Architecture
 
-**planktoscope_segment_viewer.py** — Main application (`PlanktoscopeSegmentViewer`). A PyQt5 `QMainWindow` with:
-- Left panel: folder selection, binarization method selector (Adaptive Threshold / Otsu / Global Threshold / Canny Edge), method-specific parameters, common parameters (min particle size, blur kernel, morphology iterations), batch cut button. Parameter visibility adapts to the selected method.
+**plankton_viewer.py** — Main application (`PlanktoscopeSegmentViewer`). A PyQt5 `QMainWindow` with:
+- Left panel: folder selection, binarization method selector (Adaptive Threshold / Otsu / Global Threshold / Canny Edge), method-specific parameters, common parameters (min particle size in pixels, blur kernel, morphology iterations), "Show binarized image" toggle, batch cut button. Parameter visibility adapts to the selected method.
 - Center panel: image display with green bounding box overlay showing detected particles, plus prev/next navigation.
 - Detection pipeline: grayscale → Gaussian blur → adaptive threshold → morphological close → contour detection → area filtering. Implemented in the standalone `detect_contours()` function so it can be reused outside the GUI.
 - Batch mode: iterates all images in a folder, applies current parameters, crops particles, saves as `{basename}_{NNN}.png` to a chosen output folder.

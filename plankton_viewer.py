@@ -15,10 +15,10 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QApplication, QFrame, QGroupBox, QVBoxLayout,
     QHBoxLayout, QPushButton, QLabel, QFileDialog, QDoubleSpinBox,
     QSpinBox, QStatusBar, QSizePolicy, QMessageBox, QProgressBar,
-    QComboBox
+    QComboBox, QProgressDialog, QCheckBox
 )
-from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon, QPainter, QPen, QColor
-from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon, QPainter, QPen, QColor, QPolygon
+from PyQt5.QtCore import Qt, QSize, QPoint, QRectF, QTimer
 
 IMG_FORMATS = {"tif", "tiff", "jpg", "jpeg", "png", "bmp", "gif", "jfif"}
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "planktoscope.cfg")
@@ -32,9 +32,10 @@ def detect_contours(image, th_size, blur_kernel, morph_iter,
                     adapt_block=25, adapt_C=3,
                     global_thresh=128,
                     canny_low=50, canny_high=150):
-    """Run the detection pipeline and return bounding rects.
+    """Run the detection pipeline and return (rects, binarized_image).
 
-    Returns a list of (x, y, w, h) tuples for each detected particle.
+    rects: list of (x, y, w, h) tuples for each detected particle.
+    binarized_image: the binary image after morphological close (uint8, 0/255).
     """
     img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     img_blur = cv2.GaussianBlur(img_gray, (blur_kernel, blur_kernel), sigmaX=10)
@@ -67,13 +68,13 @@ def detect_contours(image, th_size, blur_kernel, morph_iter,
     rects = []
     for cnt in cnts:
         area = cv2.contourArea(cnt)
-        if area < np.pi * (th_size / 2 * 3.48) ** 2:
+        if area < np.pi * (th_size / 2) ** 2:
             continue
         x, y, w, h = cv2.boundingRect(cnt)
         if w * h > 0.8 * image.shape[0] * image.shape[1]:
             continue
         rects.append((x, y, w, h))
-    return rects
+    return rects, img_ex
 
 
 def cut_with_rects(image, rects):
@@ -92,6 +93,29 @@ def draw_rects_on_image(image, rects):
     return vis
 
 
+def imread_unicode(path):
+    """Read image file supporting non-ASCII (e.g. Chinese) paths."""
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        return img
+    except Exception:
+        return None
+
+
+def imwrite_unicode(path, img):
+    """Write image file supporting non-ASCII (e.g. Chinese) paths."""
+    try:
+        ext = os.path.splitext(path)[1]
+        result, buf = cv2.imencode(ext, img)
+        if result:
+            buf.tofile(path)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def cv2_to_qpixmap(image):
     """Convert a BGR cv2 image to QPixmap."""
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -99,6 +123,49 @@ def cv2_to_qpixmap(image):
     bytes_per_line = ch * w
     qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg)
+
+
+class NavArrowButton(QPushButton):
+    """Semi-transparent triangular arrow button overlaid on the image."""
+    def __init__(self, direction, parent=None):
+        super().__init__(parent)
+        self.direction = direction  # "left" or "right"
+        self.setFixedSize(50, 100)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Semi-transparent background
+        bg_color = QColor(0, 0, 0, 80)
+        painter.setBrush(bg_color)
+        painter.setPen(Qt.NoPen)
+
+        if self.direction == "left":
+            bg_rect = QRectF(0, 0, w, h)
+            painter.drawRect(bg_rect)
+            # Triangle pointing right (indicates go forward/back visually)
+            triangle = QPolygon([
+                QPoint(10, h // 2),
+                QPoint(w - 15, h // 2 - 20),
+                QPoint(w - 15, h // 2 + 20),
+            ])
+        else:
+            bg_rect = QRectF(0, 0, w, h)
+            painter.drawRect(bg_rect)
+            # Triangle pointing left
+            triangle = QPolygon([
+                QPoint(w - 10, h // 2),
+                QPoint(15, h // 2 - 20),
+                QPoint(15, h // 2 + 20),
+            ])
+
+        painter.setBrush(QColor(255, 255, 255, 200))
+        painter.drawPolygon(triangle)
+        painter.end()
 
 
 class PlanktoscopeSegmentViewer(QMainWindow):
@@ -112,7 +179,7 @@ class PlanktoscopeSegmentViewer(QMainWindow):
         self.current_rects = []
 
         # Default parameters
-        self.th_size = 2.0
+        self.th_size = 10.0
         self.blur_kernel = 5
         self.adapt_block = 25
         self.adapt_C = 3
@@ -120,6 +187,8 @@ class PlanktoscopeSegmentViewer(QMainWindow):
         self.global_thresh = 128
         self.canny_low = 50
         self.canny_high = 150
+
+        self._defer_show_image = False
 
         self._setup_ui()
         self._load_settings()
@@ -170,12 +239,12 @@ class PlanktoscopeSegmentViewer(QMainWindow):
         lay_params.addWidget(self.combo_method)
 
         # Common parameters
-        lay_params.addWidget(QLabel("Min particle size (um):"))
+        lay_params.addWidget(QLabel("Min particle size (px):"))
         self.spin_th = QDoubleSpinBox()
-        self.spin_th.setRange(0.1, 500.0)
-        self.spin_th.setDecimals(1)
+        self.spin_th.setRange(1.0, 500.0)
+        self.spin_th.setDecimals(0)
         self.spin_th.setValue(self.th_size)
-        self.spin_th.setSingleStep(0.5)
+        self.spin_th.setSingleStep(1)
         self.spin_th.valueChanged.connect(self._on_param_changed)
         lay_params.addWidget(self.spin_th)
 
@@ -252,6 +321,11 @@ class PlanktoscopeSegmentViewer(QMainWindow):
         lay_info.addWidget(self.label_image_info)
         left_layout.addWidget(grp_info)
 
+        # Show binarized image toggle
+        self.chk_show_bin = QCheckBox("Show binarized image")
+        self.chk_show_bin.stateChanged.connect(self._on_param_changed)
+        left_layout.addWidget(self.chk_show_bin)
+
         # Batch button
         self.btn_batch = QPushButton("Batch Cut All Images")
         self.btn_batch.setMinimumHeight(45)
@@ -261,41 +335,35 @@ class PlanktoscopeSegmentViewer(QMainWindow):
 
         left_layout.addStretch()
 
-        # ---- Center panel (image display) ----
-        center_panel = QFrame()
-        center_layout = QVBoxLayout(center_panel)
+        # ---- Center panel (image display with overlay arrows) ----
+        self.center_panel = QFrame()
+        self.center_panel.setStyleSheet("background-color: #2b2b2b;")
+        center_layout = QVBoxLayout(self.center_panel)
         center_layout.setContentsMargins(0, 0, 0, 0)
-        center_layout.setSpacing(3)
+        center_layout.setSpacing(0)
 
         self.label_image = QLabel("Open a folder to start")
         self.label_image.setAlignment(Qt.AlignCenter)
         self.label_image.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.label_image.setStyleSheet("background-color: #2b2b2b; color: #aaa;")
-        center_layout.addWidget(self.label_image, 1)
+        center_layout.addWidget(self.label_image)
 
-        # Navigation bar
-        nav_frame = QFrame()
-        nav_frame.setMaximumHeight(45)
-        nav_layout = QHBoxLayout(nav_frame)
-        nav_layout.setContentsMargins(10, 2, 10, 2)
-
-        self.btn_prev = QPushButton("< Prev")
-        self.btn_prev.clicked.connect(self._prev_image)
-        nav_layout.addWidget(self.btn_prev)
-
+        # Page info bar at bottom
         self.label_page = QLabel("")
         self.label_page.setAlignment(Qt.AlignCenter)
-        self.label_page.setMinimumWidth(150)
-        nav_layout.addWidget(self.label_page)
+        self.label_page.setStyleSheet("color: white; background: rgba(0,0,0,120); padding: 2px 10px;")
+        self.label_page.setFixedHeight(24)
+        center_layout.addWidget(self.label_page)
 
-        self.btn_next = QPushButton("Next >")
+        # Arrow buttons as children of center_panel, positioned in resizeEvent
+        self.btn_prev = NavArrowButton("left", self.center_panel)
+        self.btn_prev.clicked.connect(self._prev_image)
+
+        self.btn_next = NavArrowButton("right", self.center_panel)
         self.btn_next.clicked.connect(self._next_image)
-        nav_layout.addWidget(self.btn_next)
-
-        center_layout.addWidget(nav_frame)
 
         root_layout.addWidget(left_panel)
-        root_layout.addWidget(center_panel, 1)
+        root_layout.addWidget(self.center_panel, 1)
 
         # Status bar
         self.statusbar = QStatusBar()
@@ -328,7 +396,7 @@ class PlanktoscopeSegmentViewer(QMainWindow):
             return
         fname = self.image_files[self.current_index]
         path = os.path.join(self.image_folder, fname)
-        img = cv2.imread(path)
+        img = imread_unicode(path)
         if img is None:
             import imageio
             try:
@@ -361,7 +429,7 @@ class PlanktoscopeSegmentViewer(QMainWindow):
         mi = self.spin_morph.value()
         method = self.combo_method.currentText()
 
-        rects = detect_contours(
+        rects, img_bin = detect_contours(
             self.current_image, th, bk, mi, method,
             adapt_block=self.spin_block.value() if self.spin_block.value() % 2 == 1 else self.spin_block.value() + 1,
             adapt_C=self.spin_C.value(),
@@ -372,7 +440,13 @@ class PlanktoscopeSegmentViewer(QMainWindow):
         self.current_rects = rects
         self.label_count.setText("Particles: %d" % len(rects))
 
-        vis = draw_rects_on_image(self.current_image, rects)
+        if self.chk_show_bin.isChecked():
+            # Convert single-channel bin to BGR for drawing rects
+            base_img = cv2.cvtColor(img_bin, cv2.COLOR_GRAY2BGR)
+        else:
+            base_img = self.current_image
+
+        vis = draw_rects_on_image(base_img, rects)
         pixmap = cv2_to_qpixmap(vis)
         scaled = pixmap.scaled(
             self.label_image.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
@@ -446,11 +520,23 @@ class PlanktoscopeSegmentViewer(QMainWindow):
         errors = 0
         total_particles = 0
 
-        self.statusbar.showMessage("Batch cutting...")
+        progress = QProgressDialog("Batch cutting...", "Cancel", 0, total, self)
+        progress.setWindowTitle("Batch Cut Progress")
+        progress.setMinimumWidth(400)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
         for idx, fname in enumerate(self.image_files):
+            progress.setValue(idx)
+            progress.setLabelText("Processing: %s\nImages: %d / %d  |  Particles: %d" % (
+                fname, idx + 1, total, total_particles))
             QApplication.processEvents()
+
+            if progress.wasCanceled():
+                break
+
             path = os.path.join(self.image_folder, fname)
-            img = cv2.imread(path)
+            img = imread_unicode(path)
             if img is None:
                 import imageio
                 try:
@@ -465,31 +551,47 @@ class PlanktoscopeSegmentViewer(QMainWindow):
                 errors += 1
                 continue
 
-            rects = detect_contours(img, th, bk, mi, method,
-                                    adapt_block=ab, adapt_C=ac,
-                                    global_thresh=gt,
-                                    canny_low=cl, canny_high=ch)
+            rects, _ = detect_contours(img, th, bk, mi, method,
+                                       adapt_block=ab, adapt_C=ac,
+                                       global_thresh=gt,
+                                       canny_low=cl, canny_high=ch)
             imgs = cut_with_rects(img, rects)
             total_particles += len(imgs)
 
             base = os.path.splitext(fname)[0]
             for i, crop in enumerate(imgs):
                 out_name = "%s_%03d.png" % (base, i + 1)
-                cv2.imwrite(os.path.join(output, out_name), crop)
+                imwrite_unicode(os.path.join(output, out_name), crop)
 
-            self.statusbar.showMessage(
-                "Batch: %d / %d  |  Particles so far: %d" % (idx + 1, total, total_particles)
-            )
+        progress.setValue(total)
 
-        msg = "Done!\n%d images processed, %d particles cropped.\nSaved to: %s" % (
-            total - errors, total_particles, output
+        processed = idx + 1 if progress.wasCanceled() else total
+        msg = "%d images processed, %d particles cropped.\nSaved to: %s" % (
+            processed - errors, total_particles, output
         )
         if errors:
             msg += "\n%d images failed to load." % errors
-        self.statusbar.showMessage("Batch cut finished.")
+        if progress.wasCanceled():
+            msg = "Batch cut cancelled.\n" + msg
         QMessageBox.information(self, "Batch Cut Complete", msg)
 
-    # ------------------------------------------------------------------ Settings
+    # ------------------------------------------------------------------ Layout
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'center_panel'):
+            ch = self.center_panel.height() - 24  # subtract page label height
+            btn_h = min(100, max(60, ch // 3))
+            btn_y = (ch - btn_h) // 2
+            self.btn_prev.setGeometry(0, btn_y, 50, btn_h)
+            self.btn_next.setGeometry(self.center_panel.width() - 50, btn_y, 50, btn_h)
+
+    # ------------------------------------------------------------------ Show/Close
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._defer_show_image and self.image_files:
+            self._defer_show_image = False
+            QTimer.singleShot(50, self._show_current_image)
+
     def closeEvent(self, event):
         self._save_settings()
         super().closeEvent(event)
@@ -505,6 +607,7 @@ class PlanktoscopeSegmentViewer(QMainWindow):
             "global_thresh": self.spin_global_thresh.value(),
             "canny_low": self.spin_canny_low.value(),
             "canny_high": self.spin_canny_high.value(),
+            "show_bin": self.chk_show_bin.isChecked(),
             "image_folder": self.image_folder,
         }
         try:
@@ -526,7 +629,7 @@ class PlanktoscopeSegmentViewer(QMainWindow):
         idx = self.combo_method.findText(method)
         if idx >= 0:
             self.combo_method.setCurrentIndex(idx)
-        self.spin_th.setValue(cfg.get("th_size", 2.0))
+        self.spin_th.setValue(cfg.get("th_size", 10.0))
         self.spin_blur.setValue(cfg.get("blur_kernel", 5))
         self.spin_block.setValue(cfg.get("adapt_block", 25))
         self.spin_C.setValue(cfg.get("adapt_C", 3))
@@ -534,15 +637,15 @@ class PlanktoscopeSegmentViewer(QMainWindow):
         self.spin_global_thresh.setValue(cfg.get("global_thresh", 128))
         self.spin_canny_low.setValue(cfg.get("canny_low", 50))
         self.spin_canny_high.setValue(cfg.get("canny_high", 150))
+        self.chk_show_bin.setChecked(cfg.get("show_bin", False))
 
         folder = cfg.get("image_folder", "")
         if folder and os.path.isdir(folder):
             self.image_folder = folder
             self.label_folder.setText(folder)
             self._load_file_list()
-            if self.image_files:
-                self.current_index = 0
-                self._show_current_image()
+            # Defer image display to showEvent so layout is computed first
+            self._defer_show_image = True
 
 
 # ------------------------------------------------------------------ Entry
