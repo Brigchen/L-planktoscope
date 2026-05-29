@@ -1,0 +1,7 @@
+# Planktoscope — 显微图像切割预览与批处理工具
+# 依赖清单 (pip install -r requirements.txt)
+
+PyQt5>=5.15
+opencv-python>=4.5
+numpy>=1.21
+imageio>=2.25
